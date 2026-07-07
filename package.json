@@ -1,0 +1,16 @@
+{
+  "name": "crustdata-vc-finder",
+  "version": "1.0.0",
+  "description": "Find the best VCs for your startup using Crustdata MCP + Gemini",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.5.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^6.45.0"
+  }
+}
