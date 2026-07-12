@@ -1,12 +1,12 @@
 /**
- * server.js — VC Finder Backend (v3.1: Deterministic Pipeline with Fixed Syntax)
+ * server.js — VC Finder Backend (v4.0: Semantic Investor Search)
  *
  * Architecture:
- * - Deterministic, backend-controlled execution flow (No LLM tool routing).
- * - Puppeteer for lightweight homepage scraping (no Crustdata Web APIs used).
- * - Groq used strictly for: (1) Startup text analysis, (2) Final investor ranking.
- * - Strict error boundaries: Aborts immediately on Crustdata 400/401/403 errors.
- * - Corrected Crustdata screener filter syntax (filter_type, type, value).
+ * - Groq extracts startup profile (industry, niche, stage).
+ * - Crustdata /person/search with semantic `search.query` finds niche-relevant
+ *   investors dynamically — no hardcoded firm names, different results per startup.
+ * - Groq ranks the returned candidates and generates why_fit explanations.
+ * - Strict filter builder prevents malformed Crustdata API requests.
  */
 
 require("dotenv").config();
@@ -26,6 +26,17 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 const MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const MIN_INVESTOR_RESULTS = 15;
+const CRUSTDATA_INVESTOR_LIMIT = Math.min(
+  Math.max(Number(process.env.CRUSTDATA_INVESTOR_LIMIT) || 50, MIN_INVESTOR_RESULTS),
+  1000
+);
+const GOOD_FIT_TIERS = new Set(["strong"]);
+const REVIEWABLE_FIT_TIERS = new Set(["strong", "possible"]);
+const INVESTOR_SIGNAL_RE = /\b(vc|venture|ventures|venture capital|capital|investor|investment|investing|investments|fund|funding|general partner|managing partner|venture partner|investment partner|founding partner|principal)\b/i;
+const INVESTOR_TITLE_RE = /\b(vc|venture capital|investor|investment|investing|general partner|managing partner|venture partner|investment partner|founding partner|managing director|principal)\b/i;
+const INVESTMENT_FIRM_RE = /\b(vc|venture|ventures|capital|invest|investment|investments|fund|partners)\b/i;
+const NON_INVESTOR_SIGNAL_RE = /\b(project leader|product manager|engineer|engineering|designer|marketing|sales|recruiter|talent|human resources|consultant|student|intern)\b/i;
 
 const crustdata = axios.create({
   baseURL: "https://api.crustdata.com",
@@ -91,8 +102,14 @@ async function scrapeHomepage(url) {
   let browser;
   try {
     browser = await puppeteer.launch({
-      headless: "true",
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+      ],
     });
     const page = await browser.newPage();
     
@@ -195,154 +212,193 @@ Respond ONLY with a valid JSON object matching this schema:
   return analysis;
 }
 
-// ── Step 3: Get Relevant VC Firms via Groq ────────────────────────────────────
-// Ask Groq for well-known VC firms that invest in this niche.
-// This is more reliable than trying to extract investor names from Crustdata
-// enrichment, which often returns small/obscure firms with few indexed partners.
-async function getRelevantVCFirms(analysis) {
-  console.log(`[Groq] Identifying VC firms for niche: "${analysis.primary_niche}"...`);
+// ── Step 3: Crustdata Semantic Investor Search ────────────────────────────────
+// Uses /person/search with a natural-language `search.query` so results are
+// driven by the startup's niche — completely different per submission.
+// No hardcoded firm names. One API call. No double-billing fallback loop.
+async function getInvestorContacts(analysis) {
+  // Build a niche-specific semantic query from the startup profile
+  const semanticQuery = [
+    "venture capital investor or VC partner",
+    analysis.primary_niche && `invests in ${analysis.primary_niche}`,
+    ...( analysis.sub_niches || []),
+    analysis.industry && `sector: ${analysis.industry}`,
+    analysis.business_model && `business model: ${analysis.business_model}`,
+    analysis.target_customer && `target customer: ${analysis.target_customer}`,
+    analysis.geography && `geography: ${analysis.geography}`,
+    analysis.funding_stage && `${analysis.funding_stage} stage startups`,
+  ].filter(Boolean).join(", ");
 
-  const prompt = `You are a venture capital database expert.
+  console.log(`[Crustdata] Semantic investor search: "${semanticQuery}"`);
 
-Startup Profile:
-- Industry: ${analysis.industry}
-- Niche: ${analysis.primary_niche}
-- Sub-niches: ${analysis.sub_niches?.join(", ")}
-- Business Model: ${analysis.business_model}
-- Stage: ${analysis.funding_stage}
-
-List exactly 6 real, well-known VC firms that are known to actively invest in this specific niche at the ${analysis.funding_stage} stage. Prioritize firms that have made multiple investments in this space and have partners with public LinkedIn profiles.
-
-Respond ONLY with a JSON object:
-{ "firms": ["Firm Name 1", "Firm Name 2", "Firm Name 3", "Firm Name 4", "Firm Name 5", "Firm Name 6"] }`;
-
-  const response = await groq.chat.completions.create({
-    model: MODEL,
-    messages: [
-      { role: "system", content: "You are a VC database expert. Output strictly JSON." },
-      { role: "user", content: prompt },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.3,
-  });
-
-  const result = parseJson(response.choices[0].message.content);
-  const firms = result?.firms;
-  if (!Array.isArray(firms) || firms.length === 0) {
-    console.warn("[Groq] No firms returned, using hardcoded fallback.");
-    return ["Sequoia Capital", "Andreessen Horowitz", "Accel", "Y Combinator", "Bessemer Venture Partners", "Lightspeed Venture Partners"];
-  }
-
-  console.log(`[Groq] Identified VC firms: ${JSON.stringify(firms)}`);
-  return firms;
-}
-
-
-// ── Step 5: Crustdata Person Search ───────────────────────────────────────────
-async function getInvestorContacts(vcFirms, _region) {
-  console.log(`[Crustdata] Searching partners at firms: ${JSON.stringify(vcFirms)}`);
-
-  const searchFilter = filterGroup("and", [
-    filterLeaf("experience.employment_details.current.company_name", "in", vcFirms),
-    filterLeaf("experience.employment_details.current.title", "in", [
-      "Partner",
-      "General Partner",
-      "Managing Director",
-      "Principal",
-      "Managing Partner",
-      "Venture Partner",
-      "Investment Partner",
-      "Founding Partner",
-    ]),
+  // Hard filter: must currently hold an investor title
+  const titleFilter = filterGroup("or", [
+    filterLeaf("experience.employment_details.current.title", "(.)", "Venture"),
+    filterLeaf("experience.employment_details.current.title", "(.)", "Investment"),
+    filterLeaf("experience.employment_details.current.title", "(.)", "Managing Director"),
+    filterLeaf("experience.employment_details.current.title", "(.)", "Investor"),
+    filterLeaf("experience.employment_details.current.title", "(.)", "General Partner"),
+    filterLeaf("experience.employment_details.current.title", "(.)", "Managing Partner"),
+    filterLeaf("experience.employment_details.current.title", "(.)", "Founding Partner"),
   ]);
 
-  let profiles = [];
   try {
-    const { data: personResults } = await crustdata.post("/person/search", {
-      filters: searchFilter,
-      limit: 10,
-      fields: ["basic_profile", "experience", "contact", "social_handles"],
+    const { data } = await crustdata.post("/person/search", {
+      search: {
+        query: semanticQuery,
+        mode: "hybrid",   // keyword + semantic — best recall
+      },
+      mode: "exact",      // enforce explicit filters as hard constraints
+      filters: titleFilter,
+      limit: CRUSTDATA_INVESTOR_LIMIT,
+      fields: [
+        "fit",
+        "basic_profile",
+        "experience.employment_details.current",
+        "social_handles",
+      ],
     });
-    profiles = personResults?.profiles || [];
+
+    console.log("crustdata data flag===== RAW /person/search RESPONSE START");
+    console.log(JSON.stringify(data, null, 2));
+    console.log("crustdata data flag===== RAW /person/search RESPONSE END");
+
+    const profiles = data?.profiles || [];
+    console.log(
+      `[Crustdata] Semantic search returned ${profiles.length} investor profiles ` +
+      `(total_count=${data?.total_count ?? "unknown"}, relation=${data?.total_count_relation ?? "unknown"}).`
+    );
+
+    return profiles.map((person) => {
+      const current = person.experience?.employment_details?.current;
+      const currentJob = (Array.isArray(current) ? current[0] : current) || {};
+      const basic = person.basic_profile || {};
+      const linkedin = person.social_handles?.professional_network_identifier?.profile_url || null;
+      const avatar = firstTruthy(
+        basic.profile_picture_url,
+        basic.profile_picture_permalink,
+        basic.profile_image_url,
+        basic.image_url,
+        person.profile_picture_url,
+        currentJob.company_profile_picture_permalink,
+        currentJob.company_logo_url
+      );
+      const location = typeof basic.location === "string"
+        ? basic.location
+        : basic.location?.full_location || [basic.location?.city, basic.location?.state, basic.location?.country].filter(Boolean).join(", ") || null;
+
+      return {
+        fit: person.fit || null,
+        name: basic.name || "Unknown Investor",
+        company: currentJob.name || currentJob.company_name || "Unknown Firm",
+        role: basic.current_title || currentJob.title || "Partner",
+        headline: basic.headline || null,
+        location,
+        avatar,
+        linkedin,
+        email: null,
+        investment_firm: currentJob.name || currentJob.company_name || "Unknown Firm",
+        recent_investment: "Undisclosed Portfolio Company",
+        funding_round: "Seed/Series A",
+      };
+    }).filter((person) => person.name !== "Unknown Investor");
   } catch (err) {
     if (err.isFatal) throw err;
-    console.warn(`[Crustdata] Person search failed: ${err.message}`);
+    console.warn(`[Crustdata] Semantic search failed: ${err.message}`);
     return [];
   }
+}
 
-  console.log(`[Crustdata] Found ${profiles.length} investor profiles.`);
+function firstTruthy(...values) {
+  return values.find((value) => typeof value === "string" && value.trim()) || null;
+}
 
-  // If strict title filter yields < 3, retry with just the company filter
-  if (profiles.length < 3) {
-    console.log(`[Crustdata] Only ${profiles.length} profiles with strict titles. Retrying with company-only filter...`);
-    try {
-      const { data: fallbackResults } = await crustdata.post("/person/search", {
-        filters: filterLeaf("experience.employment_details.current.company_name", "in", vcFirms),
-        limit: 10,
-        fields: ["basic_profile", "experience", "contact", "social_handles"],
-      });
-      const fallback = fallbackResults?.profiles || [];
-      // Merge, deduplicate by name
-      const seen = new Set(profiles.map((p) => p.basic_profile?.name));
-      for (const p of fallback) {
-        if (!seen.has(p.basic_profile?.name)) {
-          profiles.push(p);
-          seen.add(p.basic_profile?.name);
-        }
-      }
-      console.log(`[Crustdata] After fallback: ${profiles.length} total profiles.`);
-    } catch (err) {
-      if (err.isFatal) throw err;
-      console.warn(`[Crustdata] Company-only fallback search failed: ${err.message}`);
-    }
+function selectInvestorsToExplain(candidates) {
+  const primaryMatches = candidates.filter(isLikelyInvestorContact);
+  const subnicheFallbacks = candidates.filter(isSameSearchInvestorFallback);
+  const pool = uniqueCandidates([...primaryMatches, ...subnicheFallbacks]);
+  const goodFits = pool.filter((candidate) => GOOD_FIT_TIERS.has(candidate.fit));
+
+  // If we have enough strong fits, return all of them (no artificial cap)
+  if (goodFits.length >= MIN_INVESTOR_RESULTS) return goodFits;
+
+  // Otherwise, pad with remaining pool candidates to reach MIN_INVESTOR_RESULTS
+  const selected = [...goodFits];
+  const seen = new Set(goodFits.map((c) => c.linkedin || `${c.name}|${c.investment_firm}`));
+
+  for (const candidate of pool) {
+    if (selected.length >= MIN_INVESTOR_RESULTS) break;
+    const key = candidate.linkedin || `${candidate.name}|${candidate.investment_firm}`;
+    if (seen.has(key)) continue;
+    selected.push(candidate);
+    seen.add(key);
   }
 
-  return profiles.slice(0, 6).map((person) => {
-    const currentJob = person.experience?.employment_details?.current?.[0] || {};
-    const basic = person.basic_profile || {};
-    const linkedin = person.social_handles?.professional_network_identifier?.profile_url || null;
+  return selected;
+}
 
-    return {
-      name: basic.name || "Unknown Investor",
-      company: currentJob.name || currentJob.company_name || vcFirms[0],
-      role: basic.current_title || currentJob.title || "Partner",
-      linkedin,
-      email: null,
-      investment_firm: currentJob.name || currentJob.company_name || vcFirms[0],
-      recent_investment: "Undisclosed Portfolio Company",
-      funding_round: "Seed/Series A",
-    };
+function isLikelyInvestorContact(candidate) {
+  if (!REVIEWABLE_FIT_TIERS.has(candidate.fit)) return false;
+  const evidence = getCandidateEvidence(candidate);
+  const role = candidate.role || "";
+  const firmEvidence = [candidate.company, candidate.investment_firm, candidate.headline].filter(Boolean).join(" ");
+
+  if (NON_INVESTOR_SIGNAL_RE.test(evidence)) return false;
+  if (!INVESTOR_SIGNAL_RE.test(evidence)) return false;
+  return INVESTOR_TITLE_RE.test(role) || INVESTMENT_FIRM_RE.test(firmEvidence);
+}
+
+function isSameSearchInvestorFallback(candidate) {
+  if (!REVIEWABLE_FIT_TIERS.has(candidate.fit)) return false;
+
+  const evidence = getCandidateEvidence(candidate);
+  if (NON_INVESTOR_SIGNAL_RE.test(evidence)) return false;
+
+  // These are still from the same Crustdata semantic/subniche response.
+  // Use them only to satisfy the minimum result count after stricter matches.
+  return INVESTOR_SIGNAL_RE.test(evidence);
+}
+
+function getCandidateEvidence(candidate) {
+  return [
+    candidate.role,
+    candidate.headline,
+    candidate.company,
+    candidate.investment_firm,
+  ].filter(Boolean).join(" ");
+}
+
+function uniqueCandidates(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = candidate.linkedin || `${candidate.name}|${candidate.investment_firm}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
 // ── Step 7: Groq Final Ranking & Explanation ──────────────────────────────────
-async function rankInvestorsWithGroq(startupAnalysis, candidates) {
-  console.log("[Groq] Ranking candidates and generating 'why_fit' explanations...");
-  const prompt = `You are a venture capital expert. Match the startup profile below with the extracted investor candidates.
+async function explainInvestorsWithGroq(startupAnalysis, candidates) {
+  console.log("[Groq] Generating 'why_fit' explanations for selected candidates...");
+  const prompt = `You are a venture capital expert. Explain why each selected investor fits the startup profile below.
   
 Startup Profile:
 ${JSON.stringify(startupAnalysis, null, 2)}
 
-Investor Candidates (Verified Data from Crustdata):
+Selected Investor Candidates (Verified Data from Crustdata):
 ${JSON.stringify(candidates, null, 2)}
 
 Task:
-1. Select EXACTLY 3 best-fit investors from the candidates list (use all 3 slots — do not return fewer than 3 unless there are fewer than 3 candidates).
-2. For each selected investor, write a compelling 2-3 sentence "why_fit" explaining why their firm and background align with the startup's specific niche (${startupAnalysis.primary_niche}).
-3. NEVER invent or hallucinate investor names, emails, or firms. Use ONLY the provided candidate data.
+1. Return exactly one item for every selected candidate, in the same order.
+2. For each investor, write a specific 2-3 sentence "why_fit" explaining why their role, firm, headline, location, and Crustdata fit tier align with the startup's niche (${startupAnalysis.primary_niche}).
+3. NEVER invent investor names, emails, firms, portfolio companies, or funding rounds. Use ONLY the provided candidate data.
 
 Respond ONLY with a JSON object matching this schema:
 {
   "investors": [
     {
       "name": "string",
-      "company": "string",
-      "role": "string",
-      "linkedin": "string or null",
-      "email": "string or null",
-      "investment_firm": "string",
-      "recent_investment": "string",
-      "funding_round": "string",
       "why_fit": "2-3 sentence explanation"
     }
   ]
@@ -358,7 +414,16 @@ Respond ONLY with a JSON object matching this schema:
     temperature: 0.2,
   });
 
-  return parseJson(response.choices[0].message.content);
+  const parsed = parseJson(response.choices[0].message.content);
+  const explanations = Array.isArray(parsed.investors) ? parsed.investors : [];
+
+  return {
+    investors: candidates.map((candidate, index) => ({
+      ...candidate,
+      why_fit: explanations[index]?.why_fit ||
+        `${candidate.name} appears relevant based on Crustdata's ${candidate.fit || "semantic"} fit signal and current role at ${candidate.investment_firm}. Review their profile before outreach to confirm sector and stage alignment.`,
+    })),
+  };
 }
 
 // ── Master Route: /api/find-investors ─────────────────────────────────────────
@@ -383,11 +448,8 @@ app.post("/api/find-investors", async (req, res) => {
     const startupAnalysis = await analyzeStartupWithGroq(startupContext);
     console.log("[Pipeline] Analyzed Profile:", JSON.stringify(startupAnalysis));
 
-    // Step 3: Groq identifies relevant VC firms by niche (more reliable than enrichment)
-    const vcFirms = await getRelevantVCFirms(startupAnalysis);
-
-    // Step 4: Crustdata person search for partners at those firms
-    const rawCandidates = await getInvestorContacts(vcFirms, startupAnalysis.geography);
+    // Step 3: Semantic investor search — niche-driven, different results per startup
+    const rawCandidates = await getInvestorContacts(startupAnalysis);
     
     if (rawCandidates.length === 0) {
       return res.status(404).json({ 
@@ -395,11 +457,22 @@ app.post("/api/find-investors", async (req, res) => {
       });
     }
 
-    // Step 7: LLM ranks and formats final JSON
-    const finalOutput = await rankInvestorsWithGroq(startupAnalysis, rawCandidates);
+    const selectedCandidates = selectInvestorsToExplain(rawCandidates);
+    console.log(
+      `[Pipeline] Candidate quality: raw=${rawCandidates.length}, ` +
+      `likely_investor=${rawCandidates.filter(isLikelyInvestorContact).length}, ` +
+      `same_search_fallback=${rawCandidates.filter(isSameSearchInvestorFallback).length}.`
+    );
+    console.log(
+      `[Pipeline] Explaining ${selectedCandidates.length} investors ` +
+      `(${rawCandidates.filter((candidate) => GOOD_FIT_TIERS.has(candidate.fit)).length} strong fits from Crustdata).`
+    );
+
+    // Step 7: LLM formats explanations without changing verified candidate fields
+    const finalOutput = await explainInvestorsWithGroq(startupAnalysis, selectedCandidates);
 
     console.log(`[Pipeline] Successfully matched ${finalOutput.investors?.length || 0} investors.`);
-    return res.json({ investors: (finalOutput.investors || []).slice(0, 3) });
+    return res.json({ investors: finalOutput.investors || [] });
 
   } catch (err) {
     console.error("Fatal Pipeline Error:", err?.message || err);

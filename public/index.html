@@ -3,48 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VC Finder · Crustdata + Gemini</title>
+    <title>VC Finder</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <!-- ── Main card ── -->
+    <!-- ── Search card ── -->
     <main class="card" id="main-card">
       <header class="card__header">
-        <div class="logo">
-          <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-            <circle cx="14" cy="14" r="14" fill="#2563EB"/>
-            <path d="M8 14.5l4 4 8-9" stroke="#fff" stroke-width="2.2"
+        <div class="logo" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 28 28" fill="none">
+            <circle cx="14" cy="14" r="13" fill="rgba(255,255,255,0.15)"/>
+            <path d="M7 14.5l4.5 4.5 9.5-10" stroke="#fff" stroke-width="2.4"
                   stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
         <h1 class="card__title">Find Investors for Your Startup</h1>
         <p class="card__subtitle">
-          Describe your startup or provide its website — Gemini + Crustdata will
-          surface the three best-fit VCs for you.
+          Describe your startup or share its URL - It will surface
+          the most relevant VC matches for your niche.
         </p>
       </header>
 
       <form id="search-form" novalidate>
-        <!-- Textarea -->
         <div class="field">
           <label class="field__label" for="description">Startup description</label>
           <textarea
             id="description"
             name="description"
             class="field__textarea"
-            placeholder="Describe your startup — what it does, the problem it solves, traction, stage…"
+            placeholder="What does your startup do, what problem does it solve, stage, traction…"
             rows="5"
           ></textarea>
         </div>
 
-        <!-- OR divider -->
         <div class="or-divider" aria-hidden="true">
           <span class="or-divider__line"></span>
           <span class="or-divider__text">OR</span>
           <span class="or-divider__line"></span>
         </div>
 
-        <!-- URL input -->
         <div class="field">
           <label class="field__label" for="url">Website URL</label>
           <input
@@ -56,10 +53,8 @@
           />
         </div>
 
-        <!-- Error message -->
         <p id="form-error" class="form-error" role="alert" aria-live="polite"></p>
 
-        <!-- Submit -->
         <button type="submit" id="submit-btn" class="btn btn--primary">
           Find Matching Investors
         </button>
@@ -68,15 +63,31 @@
 
     <!-- ── Loading state ── -->
     <div id="loading" class="loading" hidden aria-live="polite" aria-label="Searching for investors">
-      <div class="spinner" aria-hidden="true"></div>
-      <p class="loading__text">Searching with Crustdata + Gemini…</p>
-      <p class="loading__sub">This may take 15–30 seconds</p>
+      <div class="loading__icon" aria-hidden="true">
+        <div class="spinner"></div>
+      </div>
+      <p class="loading__text">Finding your investor matches…</p>
+      <p class="loading__sub">This usually takes 15–30 seconds</p>
+      <div class="loading__steps" aria-hidden="true">
+        <div class="loading__step" id="step-1">
+          <span class="step-dot"></span> Analyzing your startup profile
+        </div>
+        <div class="loading__step" id="step-2">
+          <span class="step-dot"></span> Searching investor network
+        </div>
+        <div class="loading__step" id="step-3">
+          <span class="step-dot"></span> Ranking &amp; generating fit explanations
+        </div>
+      </div>
     </div>
 
     <!-- ── Results section ── -->
     <section id="results" class="results" hidden aria-label="Investor results">
       <div class="results__header">
-        <h2 class="results__title">Your Top 3 Investor Matches</h2>
+        <div class="results__title-wrap">
+          <h2 class="results__title">Your Investor Matches</h2>
+          <p class="results__count" id="results-count"></p>
+        </div>
         <button id="reset-btn" class="btn btn--ghost">← Search again</button>
       </div>
       <div id="investor-cards" class="investor-grid"></div>
@@ -85,48 +96,77 @@
     <!-- ── Investor card template ── -->
     <template id="investor-card-template">
       <article class="investor-card">
-        <div class="investor-card__top">
-          <div class="investor-card__avatar" aria-hidden="true"></div>
-          <div class="investor-card__identity">
-            <h3 class="investor-card__name"></h3>
-            <p class="investor-card__role"></p>
-          </div>
-          <span class="investor-card__badge"></span>
-        </div>
+        <div class="investor-card__body">
 
-        <div class="investor-card__meta">
-          <div class="investor-card__meta-row">
-            <span class="meta-label">Firm</span>
-            <span class="investor-card__firm meta-value"></span>
+          <!-- Top: avatar + name + rank -->
+          <div class="investor-card__top">
+            <div class="investor-card__avatar-wrap">
+              <div class="investor-card__avatar" aria-hidden="true"></div>
+              <div class="investor-card__fit-dot" aria-hidden="true"></div>
+            </div>
+            <div class="investor-card__identity">
+              <h3 class="investor-card__name"></h3>
+              <p class="investor-card__role"></p>
+              <p class="investor-card__headline"></p>
+            </div>
+            <span class="investor-card__rank" aria-label="Result rank"></span>
           </div>
-          <div class="investor-card__meta-row">
-            <span class="meta-label">Recent investment</span>
-            <span class="investor-card__recent meta-value"></span>
-          </div>
-          <div class="investor-card__meta-row">
-            <span class="meta-label">Round</span>
-            <span class="investor-card__round meta-value"></span>
-          </div>
-        </div>
 
-        <p class="investor-card__why"></p>
-
-        <div class="investor-card__actions">
-          <a class="btn btn--outline investor-card__linkedin" href="#" target="_blank" rel="noopener">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
-            </svg>
-            LinkedIn
-          </a>
-          <button class="btn btn--primary investor-card__email">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          <!-- Firm chip -->
+          <div class="investor-card__firm-chip">
+            <svg class="firm-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="2" y="4" width="20" height="16" rx="2"/>
-              <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
+              <rect x="2" y="7" width="20" height="14" rx="2"/>
+              <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>
             </svg>
-            Email
-          </button>
-        </div>
+            <span class="investor-card__firm-name"></span>
+          </div>
+
+          <!-- Meta grid -->
+          <div class="investor-card__meta">
+            <div class="meta-item">
+              <div class="meta-item__label">Location</div>
+              <div class="investor-card__location meta-item__value"></div>
+            </div>
+            <div class="meta-item">
+              <div class="meta-item__label">Stage</div>
+              <div class="investor-card__round meta-item__value"></div>
+            </div>
+          </div>
+
+          <!-- Fit pill -->
+          <div class="investor-card__fit-pill" aria-label="Crustdata fit tier"></div>
+
+          <!-- Why this match -->
+          <div class="investor-card__why-wrap">
+            <span class="investor-card__why-label">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/>
+              </svg>
+              Why this match
+            </span>
+            <p class="investor-card__why"></p>
+          </div>
+
+          <!-- Action buttons -->
+          <div class="investor-card__actions">
+            <a class="btn btn--li investor-card__linkedin" href="#" target="_blank" rel="noopener">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+              </svg>
+              View Profile
+            </a>
+            <button class="btn btn--email investor-card__email">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2" y="4" width="20" height="16" rx="2"/>
+                <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
+              </svg>
+              Draft Email
+            </button>
+          </div>
+
+        </div><!-- /.investor-card__body -->
       </article>
     </template>
 
